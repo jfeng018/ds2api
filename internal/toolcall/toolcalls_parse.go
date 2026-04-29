@@ -32,6 +32,21 @@ func ParseStandaloneToolCallsDetailed(text string, availableToolNames []string) 
 	return parseToolCallsDetailedXMLOnly(text)
 }
 
+func ParseAssistantToolCallsDetailed(text, thinking string, availableToolNames []string) ToolCallParseResult {
+	textParsed := ParseStandaloneToolCallsDetailed(text, availableToolNames)
+	if len(textParsed.Calls) > 0 {
+		return textParsed
+	}
+	if strings.TrimSpace(text) != "" {
+		return textParsed
+	}
+	thinkingParsed := ParseStandaloneToolCallsDetailed(thinking, availableToolNames)
+	if len(thinkingParsed.Calls) > 0 {
+		return thinkingParsed
+	}
+	return textParsed
+}
+
 func parseToolCallsDetailedXMLOnly(text string) ToolCallParseResult {
 	result := ToolCallParseResult{}
 	trimmed := strings.TrimSpace(text)
@@ -45,7 +60,17 @@ func parseToolCallsDetailedXMLOnly(text string) ToolCallParseResult {
 		return result
 	}
 
-	parsed := parseXMLToolCalls(trimmed)
+	normalized, ok := normalizeDSMLToolCallMarkup(trimmed)
+	if !ok {
+		return result
+	}
+	parsed := parseXMLToolCalls(normalized)
+	if len(parsed) == 0 && strings.Contains(strings.ToLower(normalized), "<![cdata[") {
+		recovered := SanitizeLooseCDATA(normalized)
+		if recovered != normalized {
+			parsed = parseXMLToolCalls(recovered)
+		}
+	}
 	if len(parsed) == 0 {
 		return result
 	}
@@ -67,14 +92,48 @@ func filterToolCallsDetailed(parsed []ParsedToolCall) ([]ParsedToolCall, []strin
 		if tc.Input == nil {
 			tc.Input = map[string]any{}
 		}
+		if len(tc.Input) > 0 && !toolCallInputHasMeaningfulValue(tc.Input) {
+			continue
+		}
 		out = append(out, tc)
 	}
 	return out, nil
 }
 
+func toolCallInputHasMeaningfulValue(v any) bool {
+	switch x := v.(type) {
+	case nil:
+		return false
+	case string:
+		return strings.TrimSpace(x) != ""
+	case map[string]any:
+		if len(x) == 0 {
+			return false
+		}
+		for _, child := range x {
+			if toolCallInputHasMeaningfulValue(child) {
+				return true
+			}
+		}
+		return false
+	case []any:
+		if len(x) == 0 {
+			return false
+		}
+		for _, child := range x {
+			if toolCallInputHasMeaningfulValue(child) {
+				return true
+			}
+		}
+		return false
+	default:
+		return true
+	}
+}
+
 func looksLikeToolCallSyntax(text string) bool {
-	lower := strings.ToLower(text)
-	return strings.Contains(lower, "<tool_calls")
+	hasDSML, hasCanonical := ContainsToolCallWrapperSyntaxOutsideIgnored(text)
+	return hasDSML || hasCanonical
 }
 
 func stripFencedCodeBlocks(text string) string {
@@ -88,6 +147,9 @@ func stripFencedCodeBlocks(text string) string {
 	inFence := false
 	fenceMarker := ""
 	inCDATA := false
+	// Track builder length when a fence opens so we can preserve content
+	// collected before the unclosed fence.
+	beforeFenceLen := 0
 	for _, line := range lines {
 		if inCDATA || cdataStartsBeforeFence(line) {
 			b.WriteString(line)
@@ -99,6 +161,7 @@ func stripFencedCodeBlocks(text string) string {
 			if marker, ok := parseFenceOpen(trimmed); ok {
 				inFence = true
 				fenceMarker = marker
+				beforeFenceLen = b.Len()
 				continue
 			}
 			b.WriteString(line)
@@ -112,6 +175,12 @@ func stripFencedCodeBlocks(text string) string {
 	}
 
 	if inFence {
+		// Unclosed fence: preserve content that was collected before the
+		// fence started rather than dropping everything.
+		result := b.String()
+		if beforeFenceLen > 0 && beforeFenceLen <= len(result) {
+			return result[:beforeFenceLen]
+		}
 		return ""
 	}
 	return b.String()

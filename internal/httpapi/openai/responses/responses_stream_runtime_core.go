@@ -22,6 +22,7 @@ type responsesStreamRuntime struct {
 	model       string
 	finalPrompt string
 	toolNames   []string
+	toolsRaw    any
 	traceID     string
 	toolChoice  promptcompat.ToolChoicePolicy
 
@@ -34,24 +35,31 @@ type responsesStreamRuntime struct {
 	toolCallsEmitted     bool
 	toolCallsDoneEmitted bool
 
-	sieve             toolstream.State
-	thinking          strings.Builder
-	text              strings.Builder
-	visibleText       strings.Builder
-	streamToolCallIDs map[int]string
-	functionItemIDs   map[int]string
-	functionOutputIDs map[int]int
-	functionArgs      map[int]string
-	functionDone      map[int]bool
-	functionAdded     map[int]bool
-	functionNames     map[int]string
-	messageItemID     string
-	messageOutputID   int
-	nextOutputID      int
-	messageAdded      bool
-	messagePartAdded  bool
-	sequence          int
-	failed            bool
+	sieve                 toolstream.State
+	rawThinking           strings.Builder
+	thinking              strings.Builder
+	toolDetectionThinking strings.Builder
+	rawText               strings.Builder
+	text                  strings.Builder
+	visibleText           strings.Builder
+	responseMessageID     int
+	streamToolCallIDs     map[int]string
+	functionItemIDs       map[int]string
+	functionOutputIDs     map[int]int
+	functionArgs          map[int]string
+	functionDone          map[int]bool
+	functionAdded         map[int]bool
+	functionNames         map[int]string
+	messageItemID         string
+	messageOutputID       int
+	nextOutputID          int
+	messageAdded          bool
+	messagePartAdded      bool
+	sequence              int
+	failed                bool
+	finalErrorStatus      int
+	finalErrorMessage     string
+	finalErrorCode        string
 
 	persistResponse func(obj map[string]any)
 }
@@ -67,6 +75,7 @@ func newResponsesStreamRuntime(
 	searchEnabled bool,
 	stripReferenceMarkers bool,
 	toolNames []string,
+	toolsRaw any,
 	bufferToolContent bool,
 	emitEarlyToolDeltas bool,
 	toolChoice promptcompat.ToolChoicePolicy,
@@ -84,6 +93,7 @@ func newResponsesStreamRuntime(
 		searchEnabled:         searchEnabled,
 		stripReferenceMarkers: stripReferenceMarkers,
 		toolNames:             toolNames,
+		toolsRaw:              toolsRaw,
 		bufferToolContent:     bufferToolContent,
 		emitEarlyToolDeltas:   emitEarlyToolDeltas,
 		streamToolCallIDs:     map[int]string{},
@@ -102,6 +112,9 @@ func newResponsesStreamRuntime(
 
 func (s *responsesStreamRuntime) failResponse(status int, message, code string) {
 	s.failed = true
+	s.finalErrorStatus = status
+	s.finalErrorMessage = message
+	s.finalErrorCode = code
 	failedResp := map[string]any{
 		"id":          s.responseID,
 		"type":        "response",
@@ -125,15 +138,19 @@ func (s *responsesStreamRuntime) failResponse(status int, message, code string) 
 	s.sendDone()
 }
 
-func (s *responsesStreamRuntime) finalize() {
-	finalThinking := s.thinking.String()
-	finalText := cleanVisibleOutput(s.text.String(), s.stripReferenceMarkers)
-
+func (s *responsesStreamRuntime) finalize(finishReason string, deferEmptyOutput bool) bool {
+	s.failed = false
+	s.finalErrorStatus = 0
+	s.finalErrorMessage = ""
+	s.finalErrorCode = ""
 	if s.bufferToolContent {
 		s.processToolStreamEvents(toolstream.Flush(&s.sieve, s.toolNames), true, true)
 	}
 
-	textParsed := toolcall.ParseStandaloneToolCallsDetailed(finalText, s.toolNames)
+	finalThinking := s.thinking.String()
+	finalToolDetectionThinking := s.toolDetectionThinking.String()
+	finalText := cleanVisibleOutput(s.text.String(), s.stripReferenceMarkers)
+	textParsed := detectAssistantToolCalls(s.rawText.String(), finalText, s.rawThinking.String(), finalToolDetectionThinking, s.toolNames)
 	detected := textParsed.Calls
 	s.logToolPolicyRejections(textParsed)
 
@@ -148,12 +165,18 @@ func (s *responsesStreamRuntime) finalize() {
 
 	if s.toolChoice.IsRequired() && len(detected) == 0 {
 		s.failResponse(http.StatusUnprocessableEntity, "tool_choice requires at least one valid tool call.", "tool_choice_violation")
-		return
+		return true
 	}
 	if len(detected) == 0 && strings.TrimSpace(finalText) == "" {
-		status, message, code := upstreamEmptyOutputDetail(false, finalText, finalThinking)
+		status, message, code := upstreamEmptyOutputDetail(finishReason == "content_filter", finalText, finalThinking)
+		if deferEmptyOutput {
+			s.finalErrorStatus = status
+			s.finalErrorMessage = message
+			s.finalErrorCode = code
+			return false
+		}
 		s.failResponse(status, message, code)
-		return
+		return true
 	}
 	s.closeIncompleteFunctionItems()
 
@@ -163,6 +186,7 @@ func (s *responsesStreamRuntime) finalize() {
 	}
 	s.sendEvent("response.completed", openaifmt.BuildResponsesCompletedPayload(obj))
 	s.sendDone()
+	return true
 }
 
 func (s *responsesStreamRuntime) logToolPolicyRejections(textParsed toolcall.ToolCallParseResult) {
@@ -186,22 +210,35 @@ func (s *responsesStreamRuntime) onParsed(parsed sse.LineResult) streamengine.Pa
 	if !parsed.Parsed {
 		return streamengine.ParsedDecision{}
 	}
-	if parsed.ContentFilter || parsed.ErrorMessage != "" || parsed.Stop {
+	if parsed.ResponseMessageID > 0 {
+		s.responseMessageID = parsed.ResponseMessageID
+	}
+	if parsed.ContentFilter || parsed.ErrorMessage != "" {
+		return streamengine.ParsedDecision{Stop: true, StopReason: streamengine.StopReason("content_filter")}
+	}
+	if parsed.Stop {
 		return streamengine.ParsedDecision{Stop: true}
 	}
 
 	contentSeen := false
+	for _, p := range parsed.ToolDetectionThinkingParts {
+		trimmed := sse.TrimContinuationOverlap(s.toolDetectionThinking.String(), p.Text)
+		if trimmed != "" {
+			s.toolDetectionThinking.WriteString(trimmed)
+		}
+	}
 	for _, p := range parsed.Parts {
-		cleanedText := cleanVisibleOutput(p.Text, s.stripReferenceMarkers)
-		if cleanedText == "" {
-			continue
-		}
-		if p.Type != "thinking" && s.searchEnabled && sse.IsCitation(cleanedText) {
-			continue
-		}
-		contentSeen = true
 		if p.Type == "thinking" {
+			rawTrimmed := sse.TrimContinuationOverlap(s.rawThinking.String(), p.Text)
+			if rawTrimmed != "" {
+				s.rawThinking.WriteString(rawTrimmed)
+				contentSeen = true
+			}
 			if !s.thinkingEnabled {
+				continue
+			}
+			cleanedText := cleanVisibleOutput(rawTrimmed, s.stripReferenceMarkers)
+			if cleanedText == "" {
 				continue
 			}
 			trimmed := sse.TrimContinuationOverlap(s.thinking.String(), cleanedText)
@@ -213,16 +250,28 @@ func (s *responsesStreamRuntime) onParsed(parsed sse.LineResult) streamengine.Pa
 			continue
 		}
 
-		trimmed := sse.TrimContinuationOverlap(s.text.String(), cleanedText)
-		if trimmed == "" {
+		rawTrimmed := sse.TrimContinuationOverlap(s.rawText.String(), p.Text)
+		if rawTrimmed == "" {
 			continue
 		}
-		s.text.WriteString(trimmed)
+		s.rawText.WriteString(rawTrimmed)
+		contentSeen = true
+		cleanedText := cleanVisibleOutput(rawTrimmed, s.stripReferenceMarkers)
+		if s.searchEnabled && sse.IsCitation(cleanedText) {
+			continue
+		}
+		trimmed := sse.TrimContinuationOverlap(s.text.String(), cleanedText)
+		if trimmed != "" {
+			s.text.WriteString(trimmed)
+		}
 		if !s.bufferToolContent {
+			if trimmed == "" {
+				continue
+			}
 			s.emitTextDelta(trimmed)
 			continue
 		}
-		s.processToolStreamEvents(toolstream.ProcessChunk(&s.sieve, trimmed, s.toolNames), true, true)
+		s.processToolStreamEvents(toolstream.ProcessChunk(&s.sieve, rawTrimmed, s.toolNames), true, true)
 	}
 
 	return streamengine.ParsedDecision{ContentSeen: contentSeen}

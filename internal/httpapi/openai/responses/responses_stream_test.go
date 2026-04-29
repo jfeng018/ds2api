@@ -27,7 +27,7 @@ func TestHandleResponsesStreamDoesNotEmitReasoningTextCompatEvents(t *testing.T)
 		Body:       io.NopCloser(strings.NewReader(streamBody)),
 	}
 
-	h.handleResponsesStream(rec, req, resp, "owner-a", "resp_test", "deepseek-v4-pro", "prompt", true, false, nil, promptcompat.DefaultToolChoicePolicy(), "")
+	h.handleResponsesStream(rec, req, resp, "owner-a", "resp_test", "deepseek-v4-pro", "prompt", true, false, nil, nil, promptcompat.DefaultToolChoicePolicy(), "")
 
 	body := rec.Body.String()
 	if !strings.Contains(body, "event: response.reasoning.delta") {
@@ -57,7 +57,7 @@ func TestHandleResponsesStreamEmitsOutputTextDoneBeforeContentPartDone(t *testin
 		Body:       io.NopCloser(strings.NewReader(streamBody)),
 	}
 
-	h.handleResponsesStream(rec, req, resp, "owner-a", "resp_test", "deepseek-v4-flash", "prompt", false, false, nil, promptcompat.DefaultToolChoicePolicy(), "")
+	h.handleResponsesStream(rec, req, resp, "owner-a", "resp_test", "deepseek-v4-flash", "prompt", false, false, nil, nil, promptcompat.DefaultToolChoicePolicy(), "")
 	body := rec.Body.String()
 	if !strings.Contains(body, "event: response.output_text.done") {
 		t.Fatalf("expected response.output_text.done payload, body=%s", body)
@@ -91,7 +91,7 @@ func TestHandleResponsesStreamOutputTextDeltaCarriesItemIndexes(t *testing.T) {
 		Body:       io.NopCloser(strings.NewReader(streamBody)),
 	}
 
-	h.handleResponsesStream(rec, req, resp, "owner-a", "resp_test", "deepseek-v4-flash", "prompt", false, false, nil, promptcompat.DefaultToolChoicePolicy(), "")
+	h.handleResponsesStream(rec, req, resp, "owner-a", "resp_test", "deepseek-v4-flash", "prompt", false, false, nil, nil, promptcompat.DefaultToolChoicePolicy(), "")
 	body := rec.Body.String()
 
 	deltaPayload, ok := extractSSEEventPayload(body, "response.output_text.delta")
@@ -130,7 +130,7 @@ func TestHandleResponsesStreamEmitsDistinctToolCallIDsAcrossSeparateToolBlocks(t
 		Body:       io.NopCloser(strings.NewReader(streamBody)),
 	}
 
-	h.handleResponsesStream(rec, req, resp, "owner-a", "resp_test", "deepseek-v4-flash", "prompt", false, false, []string{"read_file", "search"}, promptcompat.DefaultToolChoicePolicy(), "")
+	h.handleResponsesStream(rec, req, resp, "owner-a", "resp_test", "deepseek-v4-flash", "prompt", false, false, []string{"read_file", "search"}, nil, promptcompat.DefaultToolChoicePolicy(), "")
 
 	body := rec.Body.String()
 	doneEvents := extractSSEEventPayloads(body, "response.function_call_arguments.done")
@@ -183,7 +183,7 @@ func TestHandleResponsesStreamRequiredToolChoiceFailure(t *testing.T) {
 		Mode:    promptcompat.ToolChoiceRequired,
 		Allowed: map[string]struct{}{"read_file": {}},
 	}
-	h.handleResponsesStream(rec, req, resp, "owner-a", "resp_test", "deepseek-v4-flash", "prompt", false, false, []string{"read_file"}, policy, "")
+	h.handleResponsesStream(rec, req, resp, "owner-a", "resp_test", "deepseek-v4-flash", "prompt", false, false, []string{"read_file"}, nil, policy, "")
 
 	body := rec.Body.String()
 	if !strings.Contains(body, "event: response.failed") {
@@ -213,7 +213,7 @@ func TestHandleResponsesStreamFailsWhenUpstreamHasOnlyThinking(t *testing.T) {
 		Body:       io.NopCloser(strings.NewReader(streamBody)),
 	}
 
-	h.handleResponsesStream(rec, req, resp, "owner-a", "resp_test", "deepseek-v4-pro", "prompt", true, false, nil, promptcompat.DefaultToolChoicePolicy(), "")
+	h.handleResponsesStream(rec, req, resp, "owner-a", "resp_test", "deepseek-v4-pro", "prompt", true, false, nil, nil, promptcompat.DefaultToolChoicePolicy(), "")
 
 	body := rec.Body.String()
 	if !strings.Contains(body, "event: response.failed") {
@@ -232,6 +232,76 @@ func TestHandleResponsesStreamFailsWhenUpstreamHasOnlyThinking(t *testing.T) {
 	}
 }
 
+func TestHandleResponsesStreamPromotesThinkingToolCallsOnFinalizeWithoutMidstreamIntercept(t *testing.T) {
+	h := &Handler{}
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	rec := httptest.NewRecorder()
+
+	sseLine := func(path, value string) string {
+		b, _ := json.Marshal(map[string]any{
+			"p": path,
+			"v": value,
+		})
+		return "data: " + string(b) + "\n"
+	}
+
+	streamBody := sseLine("response/thinking_content", `<tool_calls><invoke name="read_file"><parameter name="path">README.MD</parameter></invoke></tool_calls>`) + "data: [DONE]\n"
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Body:       io.NopCloser(strings.NewReader(streamBody)),
+	}
+
+	h.handleResponsesStream(rec, req, resp, "owner-a", "resp_test", "deepseek-v4-pro", "prompt", true, false, []string{"read_file"}, nil, promptcompat.DefaultToolChoicePolicy(), "")
+
+	body := rec.Body.String()
+	if strings.Contains(body, "event: response.reasoning.delta") {
+		t.Fatalf("did not expect leaked reasoning delta in stream body, got %s", body)
+	}
+	if !strings.Contains(body, "event: response.function_call_arguments.done") {
+		t.Fatalf("expected finalize fallback function call event, got %s", body)
+	}
+	if strings.Contains(body, "event: response.failed") {
+		t.Fatalf("did not expect response.failed, body=%s", body)
+	}
+}
+
+func TestHandleResponsesStreamPromotesHiddenThinkingDSMLToolCallsOnFinalize(t *testing.T) {
+	h := &Handler{}
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	rec := httptest.NewRecorder()
+
+	sseLine := func(path, value string) string {
+		b, _ := json.Marshal(map[string]any{
+			"p": path,
+			"v": value,
+		})
+		return "data: " + string(b) + "\n"
+	}
+
+	streamBody := sseLine("response/thinking_content", `<|DSML|tool_calls><|DSML|invoke name="read_file"><|DSML|parameter name="path">README.MD</|DSML|parameter></|DSML|invoke></|DSML|tool_calls>`) + "data: [DONE]\n"
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Body:       io.NopCloser(strings.NewReader(streamBody)),
+	}
+
+	policy := promptcompat.ToolChoicePolicy{
+		Mode:    promptcompat.ToolChoiceRequired,
+		Allowed: map[string]struct{}{"read_file": {}},
+	}
+	h.handleResponsesStream(rec, req, resp, "owner-a", "resp_hidden", "deepseek-v4-pro", "prompt", false, false, []string{"read_file"}, nil, policy, "")
+
+	body := rec.Body.String()
+	if strings.Contains(body, "event: response.reasoning.delta") {
+		t.Fatalf("did not expect hidden reasoning delta in stream body, got %s", body)
+	}
+	if !strings.Contains(body, "event: response.function_call_arguments.done") {
+		t.Fatalf("expected hidden-thinking fallback function call event, got %s", body)
+	}
+	if strings.Contains(body, "event: response.failed") {
+		t.Fatalf("did not expect response.failed, body=%s", body)
+	}
+}
+
 func TestHandleResponsesNonStreamRequiredToolChoiceViolation(t *testing.T) {
 	h := &Handler{}
 	rec := httptest.NewRecorder()
@@ -247,7 +317,7 @@ func TestHandleResponsesNonStreamRequiredToolChoiceViolation(t *testing.T) {
 		Allowed: map[string]struct{}{"read_file": {}},
 	}
 
-	h.handleResponsesNonStream(rec, resp, "owner-a", "resp_test", "deepseek-v4-flash", "prompt", false, false, []string{"read_file"}, policy, "")
+	h.handleResponsesNonStream(rec, resp, "owner-a", "resp_test", "deepseek-v4-flash", "prompt", false, false, []string{"read_file"}, nil, policy, "")
 	if rec.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("expected 422 for required tool_choice violation, got %d body=%s", rec.Code, rec.Body.String())
 	}
@@ -258,7 +328,7 @@ func TestHandleResponsesNonStreamRequiredToolChoiceViolation(t *testing.T) {
 	}
 }
 
-func TestHandleResponsesNonStreamRequiredToolChoiceIgnoresThinkingToolPayload(t *testing.T) {
+func TestHandleResponsesNonStreamRequiredToolChoiceIgnoresThinkingToolPayloadWhenTextExists(t *testing.T) {
 	h := &Handler{}
 	rec := httptest.NewRecorder()
 	resp := &http.Response{
@@ -274,7 +344,7 @@ func TestHandleResponsesNonStreamRequiredToolChoiceIgnoresThinkingToolPayload(t 
 		Allowed: map[string]struct{}{"read_file": {}},
 	}
 
-	h.handleResponsesNonStream(rec, resp, "owner-a", "resp_test", "deepseek-v4-flash", "prompt", true, false, []string{"read_file"}, policy, "")
+	h.handleResponsesNonStream(rec, resp, "owner-a", "resp_test", "deepseek-v4-flash", "prompt", true, false, []string{"read_file"}, nil, policy, "")
 	if rec.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("expected 422 for required tool_choice violation, got %d body=%s", rec.Code, rec.Body.String())
 	}
@@ -296,7 +366,7 @@ func TestHandleResponsesNonStreamReturns429WhenUpstreamOutputEmpty(t *testing.T)
 		)),
 	}
 
-	h.handleResponsesNonStream(rec, resp, "owner-a", "resp_test", "deepseek-v4-flash", "prompt", false, false, nil, promptcompat.DefaultToolChoicePolicy(), "")
+	h.handleResponsesNonStream(rec, resp, "owner-a", "resp_test", "deepseek-v4-flash", "prompt", false, false, nil, nil, promptcompat.DefaultToolChoicePolicy(), "")
 	if rec.Code != http.StatusTooManyRequests {
 		t.Fatalf("expected 429 for empty upstream output, got %d body=%s", rec.Code, rec.Body.String())
 	}
@@ -318,7 +388,7 @@ func TestHandleResponsesNonStreamReturnsContentFilterErrorWhenUpstreamFilteredWi
 		)),
 	}
 
-	h.handleResponsesNonStream(rec, resp, "owner-a", "resp_test", "deepseek-v4-flash", "prompt", false, false, nil, promptcompat.DefaultToolChoicePolicy(), "")
+	h.handleResponsesNonStream(rec, resp, "owner-a", "resp_test", "deepseek-v4-flash", "prompt", false, false, nil, nil, promptcompat.DefaultToolChoicePolicy(), "")
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400 for filtered empty upstream output, got %d body=%s", rec.Code, rec.Body.String())
 	}
@@ -340,7 +410,7 @@ func TestHandleResponsesNonStreamReturns429WhenUpstreamHasOnlyThinking(t *testin
 		)),
 	}
 
-	h.handleResponsesNonStream(rec, resp, "owner-a", "resp_test", "deepseek-v4-pro", "prompt", true, false, nil, promptcompat.DefaultToolChoicePolicy(), "")
+	h.handleResponsesNonStream(rec, resp, "owner-a", "resp_test", "deepseek-v4-pro", "prompt", true, false, nil, nil, promptcompat.DefaultToolChoicePolicy(), "")
 	if rec.Code != http.StatusTooManyRequests {
 		t.Fatalf("expected 429 for thinking-only upstream output, got %d body=%s", rec.Code, rec.Body.String())
 	}
@@ -348,6 +418,112 @@ func TestHandleResponsesNonStreamReturns429WhenUpstreamHasOnlyThinking(t *testin
 	errObj, _ := out["error"].(map[string]any)
 	if asString(errObj["code"]) != "upstream_empty_output" {
 		t.Fatalf("expected code=upstream_empty_output, got %#v", out)
+	}
+}
+
+func TestHandleResponsesNonStreamPromotesThinkingToolCallsWhenTextEmpty(t *testing.T) {
+	h := &Handler{}
+	rec := httptest.NewRecorder()
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Body: io.NopCloser(strings.NewReader(
+			`data: {"p":"response/thinking_content","v":"<tool_calls><invoke name=\"read_file\"><parameter name=\"path\">README.MD</parameter></invoke></tool_calls>"}` + "\n" +
+				`data: [DONE]` + "\n",
+		)),
+	}
+
+	h.handleResponsesNonStream(rec, resp, "owner-a", "resp_test", "deepseek-v4-pro", "prompt", true, false, []string{"read_file"}, nil, promptcompat.DefaultToolChoicePolicy(), "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 for thinking tool calls, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	out := decodeJSONBody(t, rec.Body.String())
+	output, _ := out["output"].([]any)
+	if len(output) != 1 {
+		t.Fatalf("expected one output item, got %#v", out["output"])
+	}
+	first, _ := output[0].(map[string]any)
+	if got := asString(first["type"]); got != "function_call" {
+		t.Fatalf("expected function_call output, got %#v", first["type"])
+	}
+}
+
+func TestHandleResponsesNonStreamPromotesHiddenThinkingDSMLToolCallsWhenTextEmpty(t *testing.T) {
+	h := &Handler{}
+	rec := httptest.NewRecorder()
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Body: io.NopCloser(strings.NewReader(
+			`data: {"p":"response/thinking_content","v":"<|DSML|tool_calls><|DSML|invoke name=\"read_file\"><|DSML|parameter name=\"path\">README.MD</|DSML|parameter></|DSML|invoke></|DSML|tool_calls>"}` + "\n" +
+				`data: [DONE]` + "\n",
+		)),
+	}
+
+	policy := promptcompat.ToolChoicePolicy{
+		Mode:    promptcompat.ToolChoiceRequired,
+		Allowed: map[string]struct{}{"read_file": {}},
+	}
+	h.handleResponsesNonStream(rec, resp, "owner-a", "resp_hidden", "deepseek-v4-pro", "prompt", false, false, []string{"read_file"}, nil, policy, "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 for hidden thinking tool calls, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	out := decodeJSONBody(t, rec.Body.String())
+	output, _ := out["output"].([]any)
+	if len(output) != 1 {
+		t.Fatalf("expected one output item, got %#v", out["output"])
+	}
+	first, _ := output[0].(map[string]any)
+	if got := asString(first["type"]); got != "function_call" {
+		t.Fatalf("expected function_call output, got %#v", first["type"])
+	}
+	if strings.Contains(rec.Body.String(), "reasoning") {
+		t.Fatalf("did not expect hidden reasoning in response body, got %s", rec.Body.String())
+	}
+}
+
+func TestHandleResponsesStreamCoercesSchemaDeclaredStringArguments(t *testing.T) {
+	h := &Handler{}
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	rec := httptest.NewRecorder()
+	toolsRaw := []any{
+		map[string]any{
+			"type": "function",
+			"function": map[string]any{
+				"name": "Write",
+				"parameters": map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"content": map[string]any{"type": "string"},
+						"taskId":  map[string]any{"type": "string"},
+					},
+				},
+			},
+		},
+	}
+	sseLine := func(v string) string {
+		b, _ := json.Marshal(map[string]any{"p": "response/content", "v": v})
+		return "data: " + string(b) + "\n"
+	}
+	streamBody := sseLine(`<tool_calls><invoke name="Write">{"input":{"content":{"message":"hi"},"taskId":1}}</invoke></tool_calls>`) + "data: [DONE]\n"
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Body:       io.NopCloser(strings.NewReader(streamBody)),
+	}
+
+	h.handleResponsesStream(rec, req, resp, "owner-a", "resp_string_protect", "deepseek-v4-flash", "prompt", false, false, []string{"Write"}, toolsRaw, promptcompat.DefaultToolChoicePolicy(), "")
+
+	payload, ok := extractSSEEventPayload(rec.Body.String(), "response.function_call_arguments.done")
+	if !ok {
+		t.Fatalf("expected response.function_call_arguments.done payload, body=%s", rec.Body.String())
+	}
+	args := map[string]any{}
+	if err := json.Unmarshal([]byte(asString(payload["arguments"])), &args); err != nil {
+		t.Fatalf("decode streamed response arguments failed: %v", err)
+	}
+	if args["content"] != `{"message":"hi"}` {
+		t.Fatalf("expected response content stringified by schema, got %#v", args["content"])
+	}
+	if args["taskId"] != "1" {
+		t.Fatalf("expected response taskId stringified by schema, got %#v", args["taskId"])
 	}
 }
 

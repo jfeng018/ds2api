@@ -41,6 +41,37 @@ func TestProcessToolSieveInterceptsXMLToolCallWithoutLeak(t *testing.T) {
 	}
 }
 
+func TestProcessToolSieveInterceptsDSMLToolCallWithoutLeak(t *testing.T) {
+	var state State
+	chunks := []string{
+		"<|DSML|tool",
+		"_calls>\n",
+		`  <|DSML|invoke name="read_file">` + "\n",
+		`    <|DSML|parameter name="path">README.MD</|DSML|parameter>` + "\n",
+		"  </|DSML|invoke>\n",
+		"</|DSML|tool_calls>",
+	}
+	var events []Event
+	for _, c := range chunks {
+		events = append(events, ProcessChunk(&state, c, []string{"read_file"})...)
+	}
+	events = append(events, Flush(&state, []string{"read_file"})...)
+
+	var textContent string
+	var toolCalls int
+	for _, evt := range events {
+		textContent += evt.Content
+		toolCalls += len(evt.ToolCalls)
+	}
+
+	if strings.Contains(strings.ToLower(textContent), "dsml") || strings.Contains(textContent, "read_file") {
+		t.Fatalf("DSML tool call content leaked to text: %q", textContent)
+	}
+	if toolCalls != 1 {
+		t.Fatalf("expected one DSML tool call, got %d events=%#v", toolCalls, events)
+	}
+}
+
 func TestProcessToolSieveHandlesLongXMLToolCall(t *testing.T) {
 	var state State
 	const toolName = "write_to_file"
@@ -143,6 +174,41 @@ func TestProcessToolSieveKeepsCDATAEmbeddedToolClosingBuffered(t *testing.T) {
 	}
 }
 
+func TestProcessToolSieveFallsBackWhenCDATANeverCloses(t *testing.T) {
+	var state State
+	chunks := []string{
+		"<tool_calls>\n  <invoke name=\"Write\">\n    <parameter name=\"content\"><![CDATA[",
+		"hello world",
+		"</parameter>\n  </invoke>\n</tool_calls>",
+	}
+	var events []Event
+	for _, c := range chunks {
+		events = append(events, ProcessChunk(&state, c, []string{"Write"})...)
+	}
+	events = append(events, Flush(&state, []string{"Write"})...)
+
+	var textContent strings.Builder
+	toolCalls := 0
+	for _, evt := range events {
+		if evt.Content != "" {
+			textContent.WriteString(evt.Content)
+		}
+		toolCalls += len(evt.ToolCalls)
+		if len(evt.ToolCalls) > 0 {
+			if got, _ := evt.ToolCalls[0].Input["content"].(string); got != "hello world" {
+				t.Fatalf("expected recovered CDATA payload, got %q", got)
+			}
+		}
+	}
+
+	if toolCalls != 1 {
+		t.Fatalf("expected unclosed CDATA payload to still parse, got %d tool calls events=%#v", toolCalls, events)
+	}
+	if textContent.Len() != 0 {
+		t.Fatalf("expected no leaked text, got %q", textContent.String())
+	}
+}
+
 func TestProcessToolSieveXMLWithLeadingText(t *testing.T) {
 	var state State
 	// Model outputs some prose then an XML tool call.
@@ -222,7 +288,7 @@ func TestProcessToolSieveNonToolXMLKeepsSuffixForToolParsing(t *testing.T) {
 	}
 }
 
-func TestProcessToolSievePassesThroughMalformedExecutableXMLBlock(t *testing.T) {
+func TestProcessToolSieveSuppressesMalformedExecutableXMLBlock(t *testing.T) {
 	var state State
 	chunk := `<tool_calls><invoke name="read_file"><param>{"path":"README.md"}</param></invoke></tool_calls>`
 	events := ProcessChunk(&state, chunk, []string{"read_file"})
@@ -236,10 +302,39 @@ func TestProcessToolSievePassesThroughMalformedExecutableXMLBlock(t *testing.T) 
 	}
 
 	if toolCalls != 0 {
-		t.Fatalf("expected malformed executable-looking XML to stay text, got %d events=%#v", toolCalls, events)
+		t.Fatalf("expected malformed executable-looking XML not to become a tool call, got %d events=%#v", toolCalls, events)
 	}
-	if textContent.String() != chunk {
-		t.Fatalf("expected malformed executable-looking XML to pass through unchanged, got %q", textContent.String())
+	if textContent.Len() != 0 {
+		t.Fatalf("expected malformed executable-looking XML to be suppressed, got %q", textContent.String())
+	}
+}
+
+func TestProcessToolSieveSuppressesAllEmptyDSMLToolBlock(t *testing.T) {
+	var state State
+	chunk := strings.Join([]string{
+		`<|DSML|tool_calls>`,
+		`<|DSML|invoke name="Bash">`,
+		`<|DSML|parameter name="command"></|DSML|parameter>`,
+		`<|DSML|parameter name="description">   </|DSML|parameter>`,
+		`<|DSML|parameter name="timeout"></|DSML|parameter>`,
+		`</|DSML|invoke>`,
+		`</|DSML|tool_calls>`,
+	}, "\n")
+	events := ProcessChunk(&state, chunk, []string{"Bash"})
+	events = append(events, Flush(&state, []string{"Bash"})...)
+
+	var textContent strings.Builder
+	toolCalls := 0
+	for _, evt := range events {
+		textContent.WriteString(evt.Content)
+		toolCalls += len(evt.ToolCalls)
+	}
+
+	if toolCalls != 0 {
+		t.Fatalf("expected all-empty DSML block not to produce tool calls, got %d events=%#v", toolCalls, events)
+	}
+	if textContent.Len() != 0 {
+		t.Fatalf("expected all-empty DSML block not to leak as text, got %q", textContent.String())
 	}
 }
 
@@ -567,6 +662,58 @@ func TestProcessToolSievePassesThroughBareToolCallAsText(t *testing.T) {
 	}
 }
 
+func TestProcessToolSieveBareInvokeInlineProseDoesNotStall(t *testing.T) {
+	var state State
+	chunk := "Use `<invoke name=\"read_file\">` as plain documentation text."
+	events := ProcessChunk(&state, chunk, []string{"read_file"})
+
+	var textContent strings.Builder
+	toolCalls := 0
+	for _, evt := range events {
+		textContent.WriteString(evt.Content)
+		toolCalls += len(evt.ToolCalls)
+	}
+
+	if toolCalls != 0 {
+		t.Fatalf("expected inline invoke prose to remain text, got %d events=%#v", toolCalls, events)
+	}
+	if textContent.String() != chunk {
+		t.Fatalf("expected inline invoke prose to stream immediately, got %q", textContent.String())
+	}
+	if state.capturing {
+		t.Fatal("expected inline invoke prose not to leave stream capture open")
+	}
+}
+
+func TestProcessToolSieveBareInvokeExampleReleasesWhenNotRepairable(t *testing.T) {
+	var state State
+	chunks := []string{
+		`Example: <invoke name="read_file"><parameter name="path">README.md</parameter>`,
+		"</invoke> then continue.",
+	}
+	var events []Event
+	for _, c := range chunks {
+		events = append(events, ProcessChunk(&state, c, []string{"read_file"})...)
+	}
+
+	var textContent strings.Builder
+	toolCalls := 0
+	for _, evt := range events {
+		textContent.WriteString(evt.Content)
+		toolCalls += len(evt.ToolCalls)
+	}
+
+	if toolCalls != 0 {
+		t.Fatalf("expected non-repairable bare invoke to remain text, got %d events=%#v", toolCalls, events)
+	}
+	if textContent.String() != strings.Join(chunks, "") {
+		t.Fatalf("expected non-repairable bare invoke to pass through, got %q", textContent.String())
+	}
+	if state.capturing {
+		t.Fatal("expected non-repairable bare invoke not to leave stream capture open")
+	}
+}
+
 func TestProcessToolSieveRepairsMissingOpeningWrapperWithoutLeakingInvokeText(t *testing.T) {
 	var state State
 	chunks := []string{
@@ -593,5 +740,143 @@ func TestProcessToolSieveRepairsMissingOpeningWrapperWithoutLeakingInvokeText(t 
 	}
 	if strings.Contains(textContent.String(), "<invoke") || strings.Contains(textContent.String(), "</tool_calls>") {
 		t.Fatalf("expected repaired missing-wrapper stream not to leak xml text, got %q", textContent.String())
+	}
+}
+
+// Test fullwidth pipe variant: <｜tool_calls> (U+FF5C) should be buffered and parsed.
+func TestProcessToolSieveFullwidthPipeVariantDoesNotLeak(t *testing.T) {
+	var state State
+	chunks := []string{
+		"<\uff5ctool_calls>\n",
+		"<invoke name=\"execute_command\">\n",
+		"<parameter name=\"command\">git status</parameter>\n",
+		"</invoke>\n",
+		"</\uff5ctool_calls>",
+	}
+	var events []Event
+	for _, c := range chunks {
+		events = append(events, ProcessChunk(&state, c, []string{"execute_command"})...)
+	}
+	events = append(events, Flush(&state, []string{"execute_command"})...)
+
+	var textContent string
+	var toolCalls int
+	for _, evt := range events {
+		textContent += evt.Content
+		toolCalls += len(evt.ToolCalls)
+	}
+
+	if strings.Contains(textContent, "invoke") || strings.Contains(textContent, "execute_command") {
+		t.Fatalf("fullwidth pipe variant leaked to text: %q", textContent)
+	}
+	if toolCalls != 1 {
+		t.Fatalf("expected one tool call from fullwidth pipe variant, got %d events=%#v", toolCalls, events)
+	}
+}
+
+// Test <｜DSML|tool_calls> with DSML invoke/parameter tags should buffer the
+// wrapper instead of leaking it before the block is complete.
+func TestProcessToolSieveFullwidthDSMLPrefixVariantDoesNotLeak(t *testing.T) {
+	var state State
+	chunks := []string{
+		"<｜DSML|tool",
+		"_calls>\n",
+		"<|DSML|invoke name=\"Bash\">\n",
+		"<|DSML|parameter name=\"command\"><![CDATA[ls -la /Users/aq/Desktop/myproject/ds2api/]]></|DSML|parameter>\n",
+		"<|DSML|parameter name=\"description\"><![CDATA[List project root contents]]></|DSML|parameter>\n",
+		"</|DSML|invoke>\n",
+		"<|DSML|invoke name=\"Bash\">\n",
+		"<|DSML|parameter name=\"command\"><![CDATA[cat /Users/aq/Desktop/myproject/ds2api/package.json 2>/dev/null || echo \"No package.json found\"]]></|DSML|parameter>\n",
+		"<|DSML|parameter name=\"description\"><![CDATA[Check for existing package.json]]></|DSML|parameter>\n",
+		"</|DSML|invoke>\n",
+		"</|DSML|tool_calls>",
+	}
+	var events []Event
+	for _, c := range chunks {
+		events = append(events, ProcessChunk(&state, c, []string{"Bash"})...)
+	}
+	events = append(events, Flush(&state, []string{"Bash"})...)
+
+	var textContent strings.Builder
+	var toolCalls int
+	var names []string
+	for _, evt := range events {
+		textContent.WriteString(evt.Content)
+		for _, call := range evt.ToolCalls {
+			toolCalls++
+			names = append(names, call.Name)
+		}
+	}
+
+	if toolCalls != 2 {
+		t.Fatalf("expected two tool calls from fullwidth DSML prefix variant, got %d events=%#v", toolCalls, events)
+	}
+	if len(names) != 2 || names[0] != "Bash" || names[1] != "Bash" {
+		t.Fatalf("expected two Bash tool calls, got %v", names)
+	}
+	if textContent.Len() != 0 {
+		t.Fatalf("expected fullwidth DSML prefix variant not to leak text, got %q", textContent.String())
+	}
+}
+
+// Test <DSML|tool_calls> with <|DSML|invoke> (DSML prefix without leading pipe on wrapper).
+func TestProcessToolSieveDSMLPrefixVariantDoesNotLeak(t *testing.T) {
+	var state State
+	chunks := []string{
+		"<DSML|tool_calls>\n",
+		"  <|DSML|invoke name=\"execute_command\">\n",
+		"    <|DSML|parameter name=\"command\"><![CDATA[git status]]></|DSML|parameter>\n",
+		"  </|DSML|invoke>\n",
+		"</DSML|tool_calls>",
+	}
+	var events []Event
+	for _, c := range chunks {
+		events = append(events, ProcessChunk(&state, c, []string{"execute_command"})...)
+	}
+	events = append(events, Flush(&state, []string{"execute_command"})...)
+
+	var textContent string
+	var toolCalls int
+	for _, evt := range events {
+		textContent += evt.Content
+		toolCalls += len(evt.ToolCalls)
+	}
+
+	if strings.Contains(strings.ToLower(textContent), "dsml") || strings.Contains(textContent, "execute_command") {
+		t.Fatalf("DSML prefix variant leaked to text: %q", textContent)
+	}
+	if toolCalls != 1 {
+		t.Fatalf("expected one tool call from DSML prefix variant, got %d events=%#v", toolCalls, events)
+	}
+}
+
+// Test <DSML|tool_calls> with <DSML|invoke> (no pipe anywhere) should be buffered and parsed.
+func TestProcessToolSieveDSMLBarePrefixVariantDoesNotLeak(t *testing.T) {
+	var state State
+	chunks := []string{
+		"<DSML|tool_calls>\n",
+		"<DSML|invoke name=\"execute_command\">\n",
+		"<DSML|parameter name=\"command\"><![CDATA[git status]]></DSML|parameter>\n",
+		"</DSML|invoke>\n",
+		"</DSML|tool_calls>",
+	}
+	var events []Event
+	for _, c := range chunks {
+		events = append(events, ProcessChunk(&state, c, []string{"execute_command"})...)
+	}
+	events = append(events, Flush(&state, []string{"execute_command"})...)
+
+	var textContent string
+	var toolCalls int
+	for _, evt := range events {
+		textContent += evt.Content
+		toolCalls += len(evt.ToolCalls)
+	}
+
+	if strings.Contains(strings.ToLower(textContent), "dsml") || strings.Contains(textContent, "execute_command") {
+		t.Fatalf("DSML bare prefix variant leaked to text: %q", textContent)
+	}
+	if toolCalls != 1 {
+		t.Fatalf("expected one tool call from DSML bare prefix variant, got %d events=%#v", toolCalls, events)
 	}
 }

@@ -4,6 +4,8 @@
 
 # DS2API
 
+<a href="https://trendshift.io/repositories/24508" target="_blank"><img src="https://trendshift.io/api/badge/repositories/24508" alt="CJackHwang%2Fds2api | Trendshift" style="width: 250px; height: 55px;" width="250" height="55"/></a>
+
 [![License](https://img.shields.io/github/license/CJackHwang/ds2api.svg)](LICENSE)
 ![Stars](https://img.shields.io/github/stars/CJackHwang/ds2api.svg)
 ![Forks](https://img.shields.io/github/forks/CJackHwang/ds2api.svg)
@@ -25,6 +27,30 @@ Documentation entry: [Docs Index](docs/README.md) / [Architecture](docs/ARCHITEC
 > The author and repository maintainers are not responsible for any direct or indirect loss, account suspension, data loss, legal risk, or third-party claims arising from use, modification, distribution, deployment, or reliance on this project.
 >
 > Do not use this project in ways that violate service terms, agreements, laws, or platform rules. Before any commercial use, review the `LICENSE`, the relevant terms, and confirm that you have the author's written permission.
+
+## Table of Contents
+
+- [Architecture Overview (Summary)](#architecture-overview-summary)
+- [Key Capabilities](#key-capabilities)
+- [Platform Compatibility Matrix](#platform-compatibility-matrix)
+- [Model Support](#model-support)
+  - [OpenAI Endpoint](#openai-endpoint-get-v1models)
+  - [Claude Endpoint](#claude-endpoint-get-anthropicv1models)
+  - [Gemini Endpoint](#gemini-endpoint)
+- [Quick Start](#quick-start)
+  - [Option 1: Download Release Binaries](#option-1-download-release-binaries)
+  - [Option 2: Docker / GHCR](#option-2-docker--ghcr)
+  - [Option 3: Vercel](#option-3-vercel)
+  - [Option 4: Local Run](#option-4-local-run)
+- [Configuration](#configuration)
+- [Authentication Modes](#authentication-modes)
+- [Concurrency Model](#concurrency-model)
+- [Tool Call Adaptation](#tool-call-adaptation)
+- [Local Dev Packet Capture](#local-dev-packet-capture)
+- [Documentation Index](#documentation-index)
+- [Testing](#testing)
+- [Release Artifact Automation (GitHub Actions)](#release-artifact-automation-github-actions)
+- [Disclaimer](#disclaimer)
 
 ## Architecture Overview (Summary)
 
@@ -124,9 +150,9 @@ For the full module-by-module architecture and directory responsibilities, see [
 | default | `deepseek-v4-flash-search` | enabled by default, request-controlled | ✅ |
 | expert | `deepseek-v4-pro-search` | enabled by default, request-controlled | ✅ |
 | vision | `deepseek-v4-vision` | enabled by default, request-controlled | ❌ |
-| vision | `deepseek-v4-vision-search` | enabled by default, request-controlled | ✅ |
 
 Besides native IDs, DS2API also accepts common aliases as input (for example `gpt-4.1`, `gpt-5`, `gpt-5-codex`, `o3`, `claude-*`, `gemini-*`), but `/v1/models` returns normalized DeepSeek native model IDs. The complete alias behavior is documented in [API.en.md](API.en.md#model-alias-resolution) and `config.example.json`.
+Current upstream vision support exposes only the `vision` lane and does not provide a separate search-enabled vision variant.
 
 ### Claude Endpoint (`GET /anthropic/v1/models`)
 
@@ -144,7 +170,7 @@ Besides the primary aliases above, `/anthropic/v1/models` also returns Claude 4.
 - Set `ANTHROPIC_BASE_URL` to the DS2API root URL (for example `http://127.0.0.1:5001`). Claude Code sends requests to `/v1/messages?beta=true`.
 - `ANTHROPIC_API_KEY` must match an entry in `keys` from `config.json`. Keeping both a regular key and an `sk-ant-*` style key improves client compatibility.
 - If your environment has proxy variables, set `NO_PROXY=127.0.0.1,localhost,<your_host_ip>` for DS2API to avoid proxy interception of local traffic.
-- If tool calls are rendered as plain text and not executed, first verify the model output uses the only supported XML block: `<tool_calls><invoke name="..."><parameter name="...">...`, not legacy `<tools>` / `<tool_call>` / `<tool_name>` / `<param>`, `<function_call>`, `tool_use`, or standalone JSON `tool_calls`.
+- If tool calls are rendered as plain text and not executed, first verify the model output uses the recommended DSML block: `<|DSML|tool_calls><|DSML|invoke name="..."><|DSML|parameter name="...">...`. DS2API also accepts legacy canonical XML: `<tool_calls><invoke name="..."><parameter name="...">...`; legacy `<tools>` / `<tool_call>` / `<tool_name>` / `<param>`, `<function_call>`, `tool_use`, or standalone JSON `tool_calls` are not executed.
 
 ### Gemini Endpoint
 
@@ -207,6 +233,7 @@ docker-compose up -d
 ```
 
 The default `docker-compose.yml` uses `ghcr.io/cjackhwang/ds2api:latest` and maps host port `6011` to container port `5001`. If you want `5001` exposed directly, set `DS2API_HOST_PORT=5001` (or adjust the `ports` mapping).
+It also mounts `./config.json` to `/data/config.json` and sets `DS2API_CONFIG_PATH=/data/config.json` by default, which avoids runtime token persistence failures caused by read-only `/app`.
 
 Rebuild after updates: `docker-compose up -d --build`
 
@@ -276,7 +303,9 @@ Common fields:
 - `model_aliases`: one shared alias map for OpenAI / Claude / Gemini model names.
 - `runtime`: account concurrency, queueing, and token refresh behavior, hot-reloadable via Admin Settings.
 - `auto_delete.mode`: remote session cleanup after each request, supporting `none` / `single` / `all`.
-- `history_split`: multi-turn history split policy, now forced on globally; tune its trigger threshold to avoid inlining all long history into the prompt.
+- `history_split`: legacy multi-turn history split field, now ignored and kept only for backward-compatible config loading.
+- `current_input_file`: the only active split mode; it is enabled by default and uploads the full context as a `history.txt` context file once the character threshold is reached.
+- If you turn off `current_input_file`, requests pass through directly without uploading any split context file.
 
 For the full environment variable list, see [docs/DEPLOY.en.md](docs/DEPLOY.en.md). For auth behavior, see [API.en.md](API.en.md#authentication).
 
@@ -310,7 +339,7 @@ Queue limit = DS2API_ACCOUNT_MAX_QUEUE (default = recommended concurrency)
 When `tools` is present in the request, DS2API performs anti-leak handling:
 
 1. Toolcall feature matching is enabled only in **non-code-block context** (fenced examples are ignored)
-2. The parser now treats only the canonical XML wrapper as executable tool-calling syntax: `<tool_calls>` → `<invoke name="...">` → `<parameter name="...">`; legacy `<tools>` / `<tool_call>` / `<tool_name>` / `<param>`, `<function_call>`, `tool_use`, antml variants, and standalone JSON `tool_calls` payloads are treated as plain text
+2. The parser now treats the DSML shell as the recommended executable tool-calling syntax: `<|DSML|tool_calls>` → `<|DSML|invoke name="...">` → `<|DSML|parameter name="...">`; it also accepts legacy canonical XML `<tool_calls>` → `<invoke name="...">` → `<parameter name="...">`. DSML is a shell alias and internal parsing remains XML-based; legacy `<tools>` / `<tool_call>` / `<tool_name>` / `<param>`, `<function_call>`, `tool_use`, antml variants, and standalone JSON `tool_calls` payloads are treated as plain text
 3. `responses` streaming strictly uses official item lifecycle events (`response.output_item.*`, `response.content_part.*`, `response.function_call_arguments.*`)
 4. `responses` supports and enforces `tool_choice` (`auto`/`none`/`required`/forced function); `required` violations return `422` for non-stream and `response.failed` for stream
 5. The output protocol follows the client request (OpenAI / Claude / Gemini native shapes); model-side prompting can prefer XML, and the compatibility layer handles the protocol-specific translation
@@ -379,7 +408,7 @@ npm run build --prefix webui
 Workflow: `.github/workflows/release-artifacts.yml`
 
 - **Trigger**: only on GitHub Release `published` (normal pushes do not trigger builds)
-- **Outputs**: multi-platform archives (`linux/amd64`, `linux/arm64`, `darwin/amd64`, `darwin/arm64`, `windows/amd64`) + `sha256sums.txt`
+- **Outputs**: multi-platform archives (`linux/amd64`, `linux/arm64`, `linux/armv7`, `darwin/amd64`, `darwin/arm64`, `windows/amd64`, `windows/arm64`) + `sha256sums.txt`
 - **Container publishing**: GHCR only (`ghcr.io/cjackhwang/ds2api`)
 - **Each archive includes**: `ds2api` executable, `static/admin`, WASM file (with embedded fallback support), `config.example.json`-based config template, README, LICENSE
 
