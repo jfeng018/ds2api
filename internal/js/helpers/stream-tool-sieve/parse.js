@@ -6,9 +6,12 @@ const {
 const {
   parseMarkupToolCalls,
   stripFencedCodeBlocks,
+  containsToolCallWrapperSyntaxOutsideIgnored,
+  normalizeDSMLToolCallMarkup,
+  hasRepairableXMLToolCallsWrapper,
+  indexToolCDATAOpen,
+  sanitizeLooseCDATA,
 } = require('./parse_payload');
-
-const TOOL_MARKUP_PREFIXES = ['<tool_calls'];
 
 function extractToolNames(tools) {
   if (!Array.isArray(tools) || tools.length === 0) {
@@ -37,16 +40,26 @@ function parseToolCalls(text, toolNames) {
 
 function parseToolCallsDetailed(text, toolNames) {
   const result = emptyParseResult();
-  const normalized = toStringSafe(text);
-  if (!normalized) {
+  const raw = toStringSafe(text);
+  if (!raw) {
     return result;
   }
-  result.sawToolCallSyntax = looksLikeToolCallSyntax(normalized);
-  if (shouldSkipToolCallParsingForCodeFenceExample(normalized)) {
+  if (shouldSkipToolCallParsingForCodeFenceExample(raw)) {
     return result;
   }
+  const normalized = normalizeDSMLToolCallMarkup(stripFencedCodeBlocks(raw).trim());
+  if (!normalized.ok || !normalized.text) {
+    return result;
+  }
+  result.sawToolCallSyntax = looksLikeToolCallSyntax(normalized.text) || hasRepairableXMLToolCallsWrapper(normalized.text);
   // XML markup parsing only.
-  const parsed = parseMarkupToolCalls(normalized);
+  let parsed = parseMarkupToolCalls(normalized.text);
+  if (parsed.length === 0 && indexToolCDATAOpen(normalized.text, 0) >= 0) {
+    const recovered = sanitizeLooseCDATA(normalized.text);
+    if (recovered !== normalized.text) {
+      parsed = parseMarkupToolCalls(recovered);
+    }
+  }
   if (parsed.length === 0) {
     return result;
   }
@@ -64,16 +77,26 @@ function parseStandaloneToolCalls(text, toolNames) {
 
 function parseStandaloneToolCallsDetailed(text, toolNames) {
   const result = emptyParseResult();
-  const trimmed = toStringSafe(text);
-  if (!trimmed) {
+  const raw = toStringSafe(text);
+  if (!raw) {
     return result;
   }
-  result.sawToolCallSyntax = looksLikeToolCallSyntax(trimmed);
-  if (shouldSkipToolCallParsingForCodeFenceExample(trimmed)) {
+  if (shouldSkipToolCallParsingForCodeFenceExample(raw)) {
     return result;
   }
+  const normalized = normalizeDSMLToolCallMarkup(stripFencedCodeBlocks(raw).trim());
+  if (!normalized.ok || !normalized.text) {
+    return result;
+  }
+  result.sawToolCallSyntax = looksLikeToolCallSyntax(normalized.text) || hasRepairableXMLToolCallsWrapper(normalized.text);
   // XML markup parsing only.
-  const parsed = parseMarkupToolCalls(trimmed);
+  let parsed = parseMarkupToolCalls(normalized.text);
+  if (parsed.length === 0 && indexToolCDATAOpen(normalized.text, 0) >= 0) {
+    const recovered = sanitizeLooseCDATA(normalized.text);
+    if (recovered !== normalized.text) {
+      parsed = parseMarkupToolCalls(recovered);
+    }
+  }
   if (parsed.length === 0) {
     return result;
   }
@@ -101,17 +124,18 @@ function filterToolCallsDetailed(parsed, toolNames) {
     if (!tc || !tc.name) {
       continue;
     }
+    const input = tc.input && typeof tc.input === 'object' && !Array.isArray(tc.input) ? tc.input : {};
     calls.push({
       name: tc.name,
-      input: tc.input && typeof tc.input === 'object' && !Array.isArray(tc.input) ? tc.input : {},
+      input,
     });
   }
   return { calls, rejectedToolNames: [] };
 }
 
 function looksLikeToolCallSyntax(text) {
-  const lower = toStringSafe(text).toLowerCase();
-  return TOOL_MARKUP_PREFIXES.some((prefix) => lower.includes(prefix));
+  const styles = containsToolCallWrapperSyntaxOutsideIgnored(text);
+  return styles.dsml || styles.canonical;
 }
 
 function shouldSkipToolCallParsingForCodeFenceExample(text) {

@@ -21,24 +21,6 @@ func (s *Store) ModelAliases() map[string]string {
 	return out
 }
 
-func (s *Store) CompatWideInputStrictOutput() bool {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	if s.cfg.Compat.WideInputStrictOutput == nil {
-		return true
-	}
-	return *s.cfg.Compat.WideInputStrictOutput
-}
-
-func (s *Store) CompatStripReferenceMarkers() bool {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	if s.cfg.Compat.StripReferenceMarkers == nil {
-		return true
-	}
-	return *s.cfg.Compat.StripReferenceMarkers
-}
-
 func (s *Store) ToolcallMode() string {
 	return "feature_match"
 }
@@ -163,15 +145,32 @@ func (s *Store) AutoDeleteSessions() bool {
 	return s.AutoDeleteMode() != "none"
 }
 
-func (s *Store) HistorySplitEnabled() bool {
-	return true
-}
-
-func (s *Store) HistorySplitTriggerAfterTurns() int {
+func (s *Store) CurrentInputFileEnabled() bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	if s.cfg.HistorySplit.TriggerAfterTurns == nil || *s.cfg.HistorySplit.TriggerAfterTurns <= 0 {
-		return 1
+	if s.cfg.CurrentInputFile.Enabled == nil {
+		return true
 	}
-	return *s.cfg.HistorySplit.TriggerAfterTurns
+	return *s.cfg.CurrentInputFile.Enabled
+}
+
+func (s *Store) CurrentInputFileMinChars() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.cfg.CurrentInputFile.MinChars
+}
+
+func (s *Store) ThinkingInjectionEnabled() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.cfg.ThinkingInjection.Enabled == nil {
+		return true
+	}
+	return *s.cfg.ThinkingInjection.Enabled
+}
+
+func (s *Store) ThinkingInjectionPrompt() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return strings.TrimSpace(s.cfg.ThinkingInjection.Prompt)
 }

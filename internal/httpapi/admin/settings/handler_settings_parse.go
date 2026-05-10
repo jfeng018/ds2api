@@ -21,15 +21,15 @@ func boolFrom(v any) bool {
 	}
 }
 
-func parseSettingsUpdateRequest(req map[string]any) (*config.AdminConfig, *config.RuntimeConfig, *config.CompatConfig, *config.ResponsesConfig, *config.EmbeddingsConfig, *config.AutoDeleteConfig, *config.HistorySplitConfig, map[string]string, error) {
+func parseSettingsUpdateRequest(req map[string]any) (*config.AdminConfig, *config.RuntimeConfig, *config.ResponsesConfig, *config.EmbeddingsConfig, *config.AutoDeleteConfig, *config.CurrentInputFileConfig, *config.ThinkingInjectionConfig, map[string]string, error) {
 	var (
 		adminCfg        *config.AdminConfig
 		runtimeCfg      *config.RuntimeConfig
-		compatCfg       *config.CompatConfig
 		respCfg         *config.ResponsesConfig
 		embCfg          *config.EmbeddingsConfig
 		autoDeleteCfg   *config.AutoDeleteConfig
-		historySplitCfg *config.HistorySplitConfig
+		currentInputCfg *config.CurrentInputFileConfig
+		thinkingInjCfg  *config.ThinkingInjectionConfig
 		aliasMap        map[string]string
 	)
 
@@ -79,19 +79,6 @@ func parseSettingsUpdateRequest(req map[string]any) (*config.AdminConfig, *confi
 			return nil, nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("runtime.global_max_inflight must be >= runtime.account_max_inflight")
 		}
 		runtimeCfg = cfg
-	}
-
-	if raw, ok := req["compat"].(map[string]any); ok {
-		cfg := &config.CompatConfig{}
-		if v, exists := raw["wide_input_strict_output"]; exists {
-			b := boolFrom(v)
-			cfg.WideInputStrictOutput = &b
-		}
-		if v, exists := raw["strip_reference_markers"]; exists {
-			b := boolFrom(v)
-			cfg.StripReferenceMarkers = &b
-		}
-		compatCfg = cfg
 	}
 
 	if raw, ok := req["responses"].(map[string]any); ok {
@@ -150,22 +137,36 @@ func parseSettingsUpdateRequest(req map[string]any) (*config.AdminConfig, *confi
 		autoDeleteCfg = cfg
 	}
 
-	if raw, ok := req["history_split"].(map[string]any); ok {
-		cfg := &config.HistorySplitConfig{}
-		enabled := true
-		cfg.Enabled = &enabled
-		if v, exists := raw["trigger_after_turns"]; exists {
+	if raw, ok := req["current_input_file"].(map[string]any); ok {
+		cfg := &config.CurrentInputFileConfig{}
+		if v, exists := raw["enabled"]; exists {
+			enabled := boolFrom(v)
+			cfg.Enabled = &enabled
+		}
+		if v, exists := raw["min_chars"]; exists {
 			n := intFrom(v)
-			if err := config.ValidateIntRange("history_split.trigger_after_turns", n, 1, 1000, true); err != nil {
+			if err := config.ValidateIntRange("current_input_file.min_chars", n, 0, 100000000, true); err != nil {
 				return nil, nil, nil, nil, nil, nil, nil, nil, err
 			}
-			cfg.TriggerAfterTurns = &n
+			cfg.MinChars = n
 		}
-		if err := config.ValidateHistorySplitConfig(*cfg); err != nil {
+		if err := config.ValidateCurrentInputFileConfig(*cfg); err != nil {
 			return nil, nil, nil, nil, nil, nil, nil, nil, err
 		}
-		historySplitCfg = cfg
+		currentInputCfg = cfg
 	}
 
-	return adminCfg, runtimeCfg, compatCfg, respCfg, embCfg, autoDeleteCfg, historySplitCfg, aliasMap, nil
+	if raw, ok := req["thinking_injection"].(map[string]any); ok {
+		cfg := &config.ThinkingInjectionConfig{}
+		if v, exists := raw["enabled"]; exists {
+			b := boolFrom(v)
+			cfg.Enabled = &b
+		}
+		if v, exists := raw["prompt"]; exists {
+			cfg.Prompt = strings.TrimSpace(fmt.Sprintf("%v", v))
+		}
+		thinkingInjCfg = cfg
+	}
+
+	return adminCfg, runtimeCfg, respCfg, embCfg, autoDeleteCfg, currentInputCfg, thinkingInjCfg, aliasMap, nil
 }

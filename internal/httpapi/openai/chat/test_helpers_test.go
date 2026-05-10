@@ -2,6 +2,7 @@ package chat
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -12,21 +13,18 @@ import (
 
 type mockOpenAIConfig struct {
 	aliases             map[string]string
-	wideInput           bool
 	autoDeleteMode      string
 	toolMode            string
 	earlyEmit           string
 	responsesTTL        int
 	embedProv           string
-	historySplitEnabled bool
-	historySplitTurns   int
+	currentInputEnabled bool
+	currentInputMin     int
+	thinkingInjection   *bool
+	thinkingPrompt      string
 }
 
-func (m mockOpenAIConfig) ModelAliases() map[string]string { return m.aliases }
-func (m mockOpenAIConfig) CompatWideInputStrictOutput() bool {
-	return m.wideInput
-}
-func (m mockOpenAIConfig) CompatStripReferenceMarkers() bool   { return true }
+func (m mockOpenAIConfig) ModelAliases() map[string]string     { return m.aliases }
 func (m mockOpenAIConfig) ToolcallMode() string                { return m.toolMode }
 func (m mockOpenAIConfig) ToolcallEarlyEmitConfidence() string { return m.earlyEmit }
 func (m mockOpenAIConfig) ResponsesStoreTTLSeconds() int       { return m.responsesTTL }
@@ -37,14 +35,18 @@ func (m mockOpenAIConfig) AutoDeleteMode() string {
 	}
 	return m.autoDeleteMode
 }
-func (m mockOpenAIConfig) AutoDeleteSessions() bool  { return false }
-func (m mockOpenAIConfig) HistorySplitEnabled() bool { return m.historySplitEnabled }
-func (m mockOpenAIConfig) HistorySplitTriggerAfterTurns() int {
-	if m.historySplitTurns <= 0 {
-		return 1
-	}
-	return m.historySplitTurns
+func (m mockOpenAIConfig) AutoDeleteSessions() bool      { return false }
+func (m mockOpenAIConfig) CurrentInputFileEnabled() bool { return m.currentInputEnabled }
+func (m mockOpenAIConfig) CurrentInputFileMinChars() int {
+	return m.currentInputMin
 }
+func (m mockOpenAIConfig) ThinkingInjectionEnabled() bool {
+	if m.thinkingInjection == nil {
+		return false
+	}
+	return *m.thinkingInjection
+}
+func (m mockOpenAIConfig) ThinkingInjectionPrompt() string { return m.thinkingPrompt }
 
 type streamStatusAuthStub struct{}
 
@@ -147,8 +149,12 @@ func (m *inlineUploadDSStub) UploadFile(ctx context.Context, _ *auth.RequestAuth
 	if m.uploadErr != nil {
 		return nil, m.uploadErr
 	}
+	id := "file-inline-1"
+	if len(m.uploadCalls) > 1 {
+		id = "file-inline-" + fmt.Sprint(len(m.uploadCalls))
+	}
 	return &dsclient.UploadFileResult{
-		ID:       "file-inline-1",
+		ID:       id,
 		Filename: req.Filename,
 		Bytes:    int64(len(req.Data)),
 		Status:   "uploaded",

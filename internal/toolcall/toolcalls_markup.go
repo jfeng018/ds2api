@@ -9,9 +9,6 @@ import (
 
 var toolCallMarkupKVPattern = regexp.MustCompile(`(?is)<(?:[a-z0-9_:-]+:)?([a-z0-9_\-.]+)\b[^>]*>(.*?)</(?:[a-z0-9_:-]+:)?([a-z0-9_\-.]+)>`)
 
-// cdataPattern matches a standalone CDATA section.
-var cdataPattern = regexp.MustCompile(`(?is)^<!\[CDATA\[(.*?)]]>$`)
-
 func parseMarkupKVObject(text string) map[string]any {
 	matches := toolCallMarkupKVPattern.FindAllStringSubmatch(strings.TrimSpace(text), -1)
 	if len(matches) == 0 {
@@ -108,8 +105,74 @@ func extractRawTagValue(inner string) string {
 
 func extractStandaloneCDATA(inner string) (string, bool) {
 	trimmed := strings.TrimSpace(inner)
-	if cdataMatches := cdataPattern.FindStringSubmatch(trimmed); len(cdataMatches) >= 2 {
-		return cdataMatches[1], true
+	if openLen := toolCDATAOpenLenAt(trimmed, 0); openLen > 0 {
+		if closeStart := findTrailingToolCDATACloseStart(trimmed); closeStart >= openLen {
+			return trimmed[openLen:closeStart], true
+		}
+		if end := findToolCDATAEnd(trimmed, openLen); end >= 0 {
+			return trimmed[openLen:end], true
+		}
+		return trimmed[openLen:], true
 	}
 	return "", false
+}
+
+func parseJSONLiteralValue(raw string) (any, bool) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return nil, false
+	}
+
+	switch trimmed[0] {
+	case '{', '[', '"', '-', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 't', 'f', 'n':
+	default:
+		return nil, false
+	}
+
+	var parsed any
+	if err := json.Unmarshal([]byte(trimmed), &parsed); err != nil {
+		return nil, false
+	}
+	return parsed, true
+}
+
+// SanitizeLooseCDATA repairs malformed trailing CDATA openings just enough for
+// final parsing and flush-time recovery. Properly closed CDATA blocks are left
+// untouched; an unclosed opener is stripped so the remaining text can still be
+// parsed as part of the surrounding tool markup.
+func SanitizeLooseCDATA(text string) string {
+	if text == "" {
+		return ""
+	}
+
+	var b strings.Builder
+	b.Grow(len(text))
+	changed := false
+	pos := 0
+	for pos < len(text) {
+		start := indexToolCDATAOpen(text, pos)
+		if start < 0 {
+			b.WriteString(text[pos:])
+			break
+		}
+		openLen := toolCDATAOpenLenAt(text, start)
+		contentStart := start + openLen
+		b.WriteString(text[pos:start])
+
+		if endRel := findToolCDATAEnd(text, contentStart); endRel >= 0 {
+			end := endRel + toolCDATACloseLenAt(text, endRel)
+			b.WriteString(text[start:end])
+			pos = end
+			continue
+		}
+
+		changed = true
+		b.WriteString(text[contentStart:])
+		pos = len(text)
+	}
+
+	if !changed {
+		return text
+	}
+	return b.String()
 }

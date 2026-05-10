@@ -12,6 +12,7 @@ import (
 	"ds2api/internal/httpapi/openai/history"
 	"ds2api/internal/httpapi/openai/shared"
 	"ds2api/internal/promptcompat"
+	"ds2api/internal/textclean"
 	"ds2api/internal/toolcall"
 	"ds2api/internal/toolstream"
 )
@@ -32,21 +33,26 @@ type Handler struct {
 
 type streamLease struct {
 	Auth      *auth.RequestAuth
+	Standard  promptcompat.StandardRequest
+	SessionID string
 	ExpiresAt time.Time
 }
 
-func (h *Handler) compatStripReferenceMarkers() bool {
-	if h == nil {
-		return true
-	}
-	return shared.CompatStripReferenceMarkers(h.Store)
+func stripReferenceMarkersEnabled() bool {
+	return textclean.StripReferenceMarkersEnabled()
 }
 
-func (h *Handler) applyHistorySplit(ctx context.Context, a *auth.RequestAuth, stdReq promptcompat.StandardRequest) (promptcompat.StandardRequest, error) {
+func (h *Handler) applyCurrentInputFile(ctx context.Context, a *auth.RequestAuth, stdReq promptcompat.StandardRequest) (promptcompat.StandardRequest, error) {
 	if h == nil {
 		return stdReq, nil
 	}
-	return history.Service{Store: h.Store, DS: h.DS}.Apply(ctx, a, stdReq)
+	stdReq = shared.ApplyThinkingInjection(h.Store, stdReq)
+	svc := history.Service{Store: h.Store, DS: h.DS}
+	out, err := svc.ApplyCurrentInputFile(ctx, a, stdReq)
+	if err != nil || out.CurrentInputFileApplied {
+		return out, err
+	}
+	return out, nil
 }
 
 func (h *Handler) preprocessInlineFileInputs(ctx context.Context, a *auth.RequestAuth, req map[string]any) error {
@@ -74,6 +80,10 @@ func writeOpenAIError(w http.ResponseWriter, status int, message string) {
 	shared.WriteOpenAIError(w, status, message)
 }
 
+func writeOpenAIErrorWithCode(w http.ResponseWriter, status int, message, code string) {
+	shared.WriteOpenAIErrorWithCode(w, status, message, code)
+}
+
 func openAIErrorType(status int) string {
 	return shared.OpenAIErrorType(status)
 }
@@ -82,7 +92,7 @@ func writeOpenAIInlineFileError(w http.ResponseWriter, err error) {
 	files.WriteInlineFileError(w, err)
 }
 
-func mapHistorySplitError(err error) (int, string) {
+func mapCurrentInputFileError(err error) (int, string) {
 	return history.MapError(err)
 }
 
@@ -98,20 +108,12 @@ func cleanVisibleOutput(text string, stripReferenceMarkers bool) string {
 	return shared.CleanVisibleOutput(text, stripReferenceMarkers)
 }
 
-func replaceCitationMarkersWithLinks(text string, links map[int]string) string {
-	return shared.ReplaceCitationMarkersWithLinks(text, links)
+func emptyOutputRetryEnabled() bool {
+	return shared.EmptyOutputRetryEnabled()
 }
 
-func shouldWriteUpstreamEmptyOutputError(text string) bool {
-	return shared.ShouldWriteUpstreamEmptyOutputError(text)
-}
-
-func upstreamEmptyOutputDetail(contentFilter bool, text, thinking string) (int, string, string) {
-	return shared.UpstreamEmptyOutputDetail(contentFilter, text, thinking)
-}
-
-func writeUpstreamEmptyOutputError(w http.ResponseWriter, text, thinking string, contentFilter bool) bool {
-	return shared.WriteUpstreamEmptyOutputError(w, text, thinking, contentFilter)
+func emptyOutputRetryMaxAttempts() int {
+	return shared.EmptyOutputRetryMaxAttempts()
 }
 
 func formatIncrementalStreamToolCallDeltas(deltas []toolstream.ToolCallDelta, ids map[int]string) []map[string]any {
@@ -122,6 +124,6 @@ func filterIncrementalToolCallDeltasByAllowed(deltas []toolstream.ToolCallDelta,
 	return shared.FilterIncrementalToolCallDeltasByAllowed(deltas, seenNames)
 }
 
-func formatFinalStreamToolCallsWithStableIDs(calls []toolcall.ParsedToolCall, ids map[int]string) []map[string]any {
-	return shared.FormatFinalStreamToolCallsWithStableIDs(calls, ids)
+func formatFinalStreamToolCallsWithStableIDs(calls []toolcall.ParsedToolCall, ids map[int]string, toolsRaw any) []map[string]any {
+	return shared.FormatFinalStreamToolCallsWithStableIDs(calls, ids, toolsRaw)
 }

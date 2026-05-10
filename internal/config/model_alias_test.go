@@ -13,6 +13,13 @@ func TestResolveModelDirectDeepSeek(t *testing.T) {
 	}
 }
 
+func TestResolveModelDirectDeepSeekNoThinking(t *testing.T) {
+	got, ok := ResolveModel(nil, "deepseek-v4-flash-nothinking")
+	if !ok || got != "deepseek-v4-flash-nothinking" {
+		t.Fatalf("expected deepseek-v4-flash-nothinking, got ok=%v model=%q", ok, got)
+	}
+}
+
 func TestResolveModelAlias(t *testing.T) {
 	got, ok := ResolveModel(nil, "gpt-4.1")
 	if !ok || got != "deepseek-v4-flash" {
@@ -31,6 +38,13 @@ func TestResolveLatestClaudeAlias(t *testing.T) {
 	got, ok := ResolveModel(nil, "claude-sonnet-4-6")
 	if !ok || got != "deepseek-v4-flash" {
 		t.Fatalf("expected alias claude-sonnet-4-6 -> deepseek-v4-flash, got ok=%v model=%q", ok, got)
+	}
+}
+
+func TestResolveLatestClaudeAliasNoThinking(t *testing.T) {
+	got, ok := ResolveModel(nil, "claude-sonnet-4-6-nothinking")
+	if !ok || got != "deepseek-v4-flash-nothinking" {
+		t.Fatalf("expected alias claude-sonnet-4-6-nothinking -> deepseek-v4-flash-nothinking, got ok=%v model=%q", ok, got)
 	}
 }
 
@@ -61,17 +75,17 @@ func TestResolveExpandedHistoricalAliases(t *testing.T) {
 	}
 }
 
-func TestResolveModelHeuristicReasoner(t *testing.T) {
-	got, ok := ResolveModel(nil, "o3-super")
-	if !ok || got != "deepseek-v4-pro" {
-		t.Fatalf("expected heuristic reasoner, got ok=%v model=%q", ok, got)
-	}
-}
-
 func TestResolveModelUnknown(t *testing.T) {
 	_, ok := ResolveModel(nil, "totally-custom-model")
 	if ok {
 		t.Fatal("expected unknown model to fail resolve")
+	}
+}
+
+func TestResolveModelUnknownKnownFamilyName(t *testing.T) {
+	_, ok := ResolveModel(nil, "gpt-5.5-pro-search")
+	if ok {
+		t.Fatal("expected unknown known-family model to fail resolve without alias")
 	}
 }
 
@@ -123,10 +137,10 @@ func TestResolveModelCustomAliasToExpert(t *testing.T) {
 
 func TestResolveModelCustomAliasToVision(t *testing.T) {
 	got, ok := ResolveModel(mockModelAliasReader{
-		"my-vision-model": "deepseek-v4-vision-search",
+		"my-vision-model": "deepseek-v4-vision",
 	}, "my-vision-model")
-	if !ok || got != "deepseek-v4-vision-search" {
-		t.Fatalf("expected alias -> deepseek-v4-vision-search, got ok=%v model=%q", ok, got)
+	if !ok || got != "deepseek-v4-vision" {
+		t.Fatalf("expected alias -> deepseek-v4-vision, got ok=%v model=%q", ok, got)
 	}
 }
 

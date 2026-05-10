@@ -17,7 +17,7 @@ func (h *Handler) updateSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	adminCfg, runtimeCfg, compatCfg, responsesCfg, embeddingsCfg, autoDeleteCfg, historySplitCfg, aliasMap, err := parseSettingsUpdateRequest(req)
+	adminCfg, runtimeCfg, responsesCfg, embeddingsCfg, autoDeleteCfg, currentInputCfg, thinkingInjCfg, aliasMap, err := parseSettingsUpdateRequest(req)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": err.Error()})
 		return
@@ -28,6 +28,10 @@ func (h *Handler) updateSettings(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	currentInputEnabledSet := hasNestedSettingsKey(req, "current_input_file", "enabled")
+	currentInputMinCharsSet := hasNestedSettingsKey(req, "current_input_file", "min_chars")
+	thinkingInjectionEnabledSet := hasNestedSettingsKey(req, "thinking_injection", "enabled")
+	thinkingInjectionPromptSet := hasNestedSettingsKey(req, "thinking_injection", "prompt")
 
 	if err := h.Store.Update(func(c *config.Config) error {
 		if adminCfg != nil {
@@ -49,14 +53,6 @@ func (h *Handler) updateSettings(w http.ResponseWriter, r *http.Request) {
 				c.Runtime.TokenRefreshIntervalHours = runtimeCfg.TokenRefreshIntervalHours
 			}
 		}
-		if compatCfg != nil {
-			if compatCfg.WideInputStrictOutput != nil {
-				c.Compat.WideInputStrictOutput = compatCfg.WideInputStrictOutput
-			}
-			if compatCfg.StripReferenceMarkers != nil {
-				c.Compat.StripReferenceMarkers = compatCfg.StripReferenceMarkers
-			}
-		}
 		if responsesCfg != nil && responsesCfg.StoreTTLSeconds > 0 {
 			c.Responses.StoreTTLSeconds = responsesCfg.StoreTTLSeconds
 		}
@@ -67,12 +63,20 @@ func (h *Handler) updateSettings(w http.ResponseWriter, r *http.Request) {
 			c.AutoDelete.Mode = autoDeleteCfg.Mode
 			c.AutoDelete.Sessions = autoDeleteCfg.Sessions
 		}
-		if historySplitCfg != nil {
-			if historySplitCfg.Enabled != nil {
-				c.HistorySplit.Enabled = historySplitCfg.Enabled
+		if currentInputCfg != nil {
+			if currentInputEnabledSet {
+				c.CurrentInputFile.Enabled = currentInputCfg.Enabled
 			}
-			if historySplitCfg.TriggerAfterTurns != nil {
-				c.HistorySplit.TriggerAfterTurns = historySplitCfg.TriggerAfterTurns
+			if currentInputMinCharsSet {
+				c.CurrentInputFile.MinChars = currentInputCfg.MinChars
+			}
+		}
+		if thinkingInjCfg != nil {
+			if thinkingInjectionEnabledSet {
+				c.ThinkingInjection.Enabled = thinkingInjCfg.Enabled
+			}
+			if thinkingInjectionPromptSet {
+				c.ThinkingInjection.Prompt = thinkingInjCfg.Prompt
 			}
 		}
 		if aliasMap != nil {
@@ -127,4 +131,13 @@ func (h *Handler) updateSettingsPassword(w http.ResponseWriter, r *http.Request)
 		"force_relogin":        true,
 		"jwt_valid_after_unix": now,
 	})
+}
+
+func hasNestedSettingsKey(req map[string]any, section, key string) bool {
+	raw, ok := req[section].(map[string]any)
+	if !ok {
+		return false
+	}
+	_, exists := raw[key]
+	return exists
 }

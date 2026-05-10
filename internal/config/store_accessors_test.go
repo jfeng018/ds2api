@@ -2,41 +2,45 @@ package config
 
 import "testing"
 
-func TestStoreHistorySplitAccessors(t *testing.T) {
+func TestStoreCurrentInputFileAccessors(t *testing.T) {
 	store := &Store{cfg: Config{}}
-	if !store.HistorySplitEnabled() {
-		t.Fatal("expected history split enabled by default")
+	if !store.CurrentInputFileEnabled() {
+		t.Fatal("expected current input file enabled by default")
 	}
-	if got := store.HistorySplitTriggerAfterTurns(); got != 1 {
-		t.Fatalf("default history split trigger_after_turns=%d want=1", got)
+	if got := store.CurrentInputFileMinChars(); got != 0 {
+		t.Fatalf("default current input file min_chars=%d want=0", got)
 	}
 
 	enabled := false
-	turns := 3
-	store.cfg.HistorySplit = HistorySplitConfig{
-		Enabled:           &enabled,
-		TriggerAfterTurns: &turns,
+	store.cfg.CurrentInputFile = CurrentInputFileConfig{Enabled: &enabled, MinChars: 12345}
+	if store.CurrentInputFileEnabled() {
+		t.Fatal("expected current input file disabled")
 	}
 
-	if !store.HistorySplitEnabled() {
-		t.Fatal("expected history split to stay enabled after legacy disabled override")
+	enabled = true
+	store.cfg.CurrentInputFile.Enabled = &enabled
+	if !store.CurrentInputFileEnabled() {
+		t.Fatal("expected current input file enabled")
 	}
-	if got := store.HistorySplitTriggerAfterTurns(); got != 3 {
-		t.Fatalf("history split trigger_after_turns=%d want=3", got)
+	if got := store.CurrentInputFileMinChars(); got != 12345 {
+		t.Fatalf("current input file min_chars=%d want=12345", got)
 	}
 }
 
-func TestStoreHistorySplitLegacyDisabledConfigNormalizesToEnabled(t *testing.T) {
-	t.Setenv("DS2API_CONFIG_JSON", `{"keys":["k1"],"history_split":{"enabled":false,"trigger_after_turns":2}}`)
-	store := LoadStore()
-	if !store.HistorySplitEnabled() {
-		t.Fatal("expected history split enabled when legacy config disables it")
+func TestStoreThinkingInjectionAccessors(t *testing.T) {
+	store := &Store{cfg: Config{}}
+	if !store.ThinkingInjectionEnabled() {
+		t.Fatal("expected thinking injection enabled by default")
 	}
-	snap := store.Snapshot()
-	if snap.HistorySplit.Enabled == nil || !*snap.HistorySplit.Enabled {
-		t.Fatalf("expected normalized history_split.enabled=true, got %#v", snap.HistorySplit.Enabled)
+
+	disabled := false
+	store.cfg.ThinkingInjection.Enabled = &disabled
+	if store.ThinkingInjectionEnabled() {
+		t.Fatal("expected thinking injection disabled by explicit config")
 	}
-	if got := store.HistorySplitTriggerAfterTurns(); got != 2 {
-		t.Fatalf("history split trigger_after_turns=%d want=2", got)
+
+	store.cfg.ThinkingInjection.Prompt = "  custom thinking prompt  "
+	if got := store.ThinkingInjectionPrompt(); got != "custom thinking prompt" {
+		t.Fatalf("thinking injection prompt=%q want custom thinking prompt", got)
 	}
 }

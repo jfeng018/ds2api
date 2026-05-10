@@ -1,6 +1,9 @@
 package config
 
-import "strings"
+import (
+	"strings"
+	"time"
+)
 
 type ModelInfo struct {
 	ID         string `json:"id"`
@@ -9,21 +12,47 @@ type ModelInfo struct {
 	OwnedBy    string `json:"owned_by"`
 	Permission []any  `json:"permission,omitempty"`
 }
+type OllamaModelInfo struct {
+	Name       string `json:"name"`
+	Model      string `json:"model"`
+	Size       int64  `json:"size"`
+	ModifiedAt string `json:"modified_at"`
+}
+type OllamaCapabilitiesModelInfo struct {
+	ID           string   `json:"id"`
+	Capabilities []string `json:"capabilities"`
+}
 
 type ModelAliasReader interface {
 	ModelAliases() map[string]string
 }
 
-var DeepSeekModels = []ModelInfo{
+const noThinkingModelSuffix = "-nothinking"
+
+var deepSeekBaseModels = []ModelInfo{
 	{ID: "deepseek-v4-flash", Object: "model", Created: 1677610602, OwnedBy: "deepseek", Permission: []any{}},
 	{ID: "deepseek-v4-pro", Object: "model", Created: 1677610602, OwnedBy: "deepseek", Permission: []any{}},
 	{ID: "deepseek-v4-flash-search", Object: "model", Created: 1677610602, OwnedBy: "deepseek", Permission: []any{}},
 	{ID: "deepseek-v4-pro-search", Object: "model", Created: 1677610602, OwnedBy: "deepseek", Permission: []any{}},
 	{ID: "deepseek-v4-vision", Object: "model", Created: 1677610602, OwnedBy: "deepseek", Permission: []any{}},
-	{ID: "deepseek-v4-vision-search", Object: "model", Created: 1677610602, OwnedBy: "deepseek", Permission: []any{}},
 }
 
-var ClaudeModels = []ModelInfo{
+var OllamaCapabilitiesModels = []OllamaCapabilitiesModelInfo{
+	{ID: "deepseek-v4-flash", Capabilities: []string{"tools", "thinking"}},
+	{ID: "deepseek-v4-pro", Capabilities: []string{"tools", "thinking"}},
+	{ID: "deepseek-v4-flash-search", Capabilities: []string{"tools", "thinking"}},
+	{ID: "deepseek-v4-pro-search", Capabilities: []string{"tools", "thinking"}},
+	{ID: "deepseek-v4-vision", Capabilities: []string{"tools", "thinking", "vision"}},
+	{ID: "deepseek-v4-flash-nothinking", Capabilities: []string{"tools"}},
+	{ID: "deepseek-v4-pro-nothinking", Capabilities: []string{"tools"}},
+	{ID: "deepseek-v4-flash-search-nothinking", Capabilities: []string{"tools"}},
+	{ID: "deepseek-v4-pro-search-nothinking", Capabilities: []string{"tools"}},
+	{ID: "deepseek-v4-vision-nothinking", Capabilities: []string{"tools", "vision"}},
+}
+
+var DeepSeekModels = appendNoThinkingVariants(deepSeekBaseModels)
+var OllamaModels = mapToOllamaModels(DeepSeekModels)
+var claudeBaseModels = []ModelInfo{
 	// Current aliases
 	{ID: "claude-opus-4-6", Object: "model", Created: 1715635200, OwnedBy: "anthropic"},
 	{ID: "claude-sonnet-4-6", Object: "model", Created: 1715635200, OwnedBy: "anthropic"},
@@ -53,24 +82,31 @@ var ClaudeModels = []ModelInfo{
 	{ID: "claude-3-haiku-20240307", Object: "model", Created: 1715635200, OwnedBy: "anthropic"},
 }
 
+var ClaudeModels = appendNoThinkingVariants(claudeBaseModels)
+
 func GetModelConfig(model string) (thinking bool, search bool, ok bool) {
-	switch lower(model) {
+	baseModel, noThinking := splitNoThinkingModel(model)
+	if baseModel == "" {
+		return false, false, false
+	}
+	switch baseModel {
 	case "deepseek-v4-flash", "deepseek-v4-pro", "deepseek-v4-vision":
-		return true, false, true
-	case "deepseek-v4-flash-search", "deepseek-v4-pro-search", "deepseek-v4-vision-search":
-		return true, true, true
+		return !noThinking, false, true
+	case "deepseek-v4-flash-search", "deepseek-v4-pro-search":
+		return !noThinking, true, true
 	default:
 		return false, false, false
 	}
 }
 
 func GetModelType(model string) (modelType string, ok bool) {
-	switch lower(model) {
+	baseModel, _ := splitNoThinkingModel(model)
+	switch baseModel {
 	case "deepseek-v4-flash", "deepseek-v4-flash-search":
 		return "default", true
 	case "deepseek-v4-pro", "deepseek-v4-pro-search":
 		return "expert", true
-	case "deepseek-v4-vision", "deepseek-v4-vision-search":
+	case "deepseek-v4-vision":
 		return "vision", true
 	default:
 		return "", false
@@ -80,6 +116,11 @@ func GetModelType(model string) (modelType string, ok bool) {
 func IsSupportedDeepSeekModel(model string) bool {
 	_, _, ok := GetModelConfig(model)
 	return ok
+}
+
+func IsNoThinkingModel(model string) bool {
+	_, noThinking := splitNoThinkingModel(model)
+	return noThinking
 }
 
 func DefaultModelAliases() map[string]string {
@@ -191,77 +232,18 @@ func ResolveModel(store ModelAliasReader, requested string) (string, bool) {
 	if model == "" {
 		return "", false
 	}
-	if isRetiredHistoricalModel(model) {
-		return "", false
-	}
+	aliases := loadModelAliases(store)
 	if IsSupportedDeepSeekModel(model) {
 		return model, true
-	}
-	aliases := DefaultModelAliases()
-	if store != nil {
-		for k, v := range store.ModelAliases() {
-			aliases[lower(strings.TrimSpace(k))] = lower(strings.TrimSpace(v))
-		}
 	}
 	if mapped, ok := aliases[model]; ok && IsSupportedDeepSeekModel(mapped) {
 		return mapped, true
 	}
-	if strings.HasPrefix(model, "deepseek-") {
-		return "", false
+	baseModel, noThinking := splitNoThinkingModel(model)
+	if mapped, ok := aliases[baseModel]; ok && IsSupportedDeepSeekModel(mapped) {
+		return withNoThinkingVariant(mapped, noThinking), true
 	}
-
-	knownFamily := false
-	for _, prefix := range []string{
-		"gpt-", "o1", "o3", "claude-", "gemini-", "llama-", "qwen-", "mistral-", "command-",
-	} {
-		if strings.HasPrefix(model, prefix) {
-			knownFamily = true
-			break
-		}
-	}
-	if !knownFamily {
-		return "", false
-	}
-
-	useVision := strings.Contains(model, "vision")
-	useReasoner := strings.Contains(model, "reason") ||
-		strings.Contains(model, "reasoner") ||
-		strings.HasPrefix(model, "o1") ||
-		strings.HasPrefix(model, "o3") ||
-		strings.Contains(model, "opus") ||
-		strings.Contains(model, "slow") ||
-		strings.Contains(model, "r1")
-	useSearch := strings.Contains(model, "search")
-
-	switch {
-	case useVision && useSearch:
-		return "deepseek-v4-vision-search", true
-	case useVision:
-		return "deepseek-v4-vision", true
-	case useReasoner && useSearch:
-		return "deepseek-v4-pro-search", true
-	case useReasoner:
-		return "deepseek-v4-pro", true
-	case useSearch:
-		return "deepseek-v4-flash-search", true
-	default:
-		return "deepseek-v4-flash", true
-	}
-}
-
-func isRetiredHistoricalModel(model string) bool {
-	switch {
-	case strings.HasPrefix(model, "claude-1."):
-		return true
-	case strings.HasPrefix(model, "claude-2."):
-		return true
-	case strings.HasPrefix(model, "claude-instant-"):
-		return true
-	case strings.HasPrefix(model, "gpt-3.5"):
-		return true
-	default:
-		return false
-	}
+	return "", false
 }
 
 func lower(s string) string {
@@ -291,6 +273,23 @@ func OpenAIModelByID(store ModelAliasReader, id string) (ModelInfo, bool) {
 	return ModelInfo{}, false
 }
 
+func OllamaModelsResponse() map[string]any {
+	return map[string]any{"models": OllamaModels}
+}
+
+func OllamaModelByID(store ModelAliasReader, id string) (OllamaCapabilitiesModelInfo, bool) {
+	canonical, ok := ResolveModel(store, id)
+	if !ok {
+		return OllamaCapabilitiesModelInfo{}, false
+	}
+	for _, model := range OllamaCapabilitiesModels {
+		if model.ID == canonical {
+			return model, true
+		}
+	}
+	return OllamaCapabilitiesModelInfo{}, false
+}
+
 func ClaudeModelsResponse() map[string]any {
 	resp := map[string]any{"object": "list", "data": ClaudeModels}
 	if len(ClaudeModels) > 0 {
@@ -302,4 +301,61 @@ func ClaudeModelsResponse() map[string]any {
 	}
 	resp["has_more"] = false
 	return resp
+}
+
+func appendNoThinkingVariants(models []ModelInfo) []ModelInfo {
+	out := make([]ModelInfo, 0, len(models)*2)
+	for _, model := range models {
+		out = append(out, model)
+		variant := model
+		variant.ID = withNoThinkingVariant(model.ID, true)
+		out = append(out, variant)
+	}
+	return out
+}
+func mapToOllamaModels(models []ModelInfo) []OllamaModelInfo {
+	out := make([]OllamaModelInfo, 0, len(models))
+	for _, model := range models {
+		var modifiedAt string
+		if model.Created > 0 {
+			modifiedAt = time.Unix(model.Created, 0).Format(time.RFC3339)
+		}
+		ollamaModel := OllamaModelInfo{
+			Name:       model.ID,
+			Model:      model.ID,
+			Size:       0,
+			ModifiedAt: modifiedAt,
+		}
+		out = append(out, ollamaModel)
+	}
+	return out
+}
+
+func splitNoThinkingModel(model string) (string, bool) {
+	model = lower(strings.TrimSpace(model))
+	if strings.HasSuffix(model, noThinkingModelSuffix) {
+		return strings.TrimSuffix(model, noThinkingModelSuffix), true
+	}
+	return model, false
+}
+
+func withNoThinkingVariant(model string, enabled bool) string {
+	baseModel, _ := splitNoThinkingModel(model)
+	if !enabled {
+		return baseModel
+	}
+	if baseModel == "" {
+		return ""
+	}
+	return baseModel + noThinkingModelSuffix
+}
+
+func loadModelAliases(store ModelAliasReader) map[string]string {
+	aliases := DefaultModelAliases()
+	if store != nil {
+		for k, v := range store.ModelAliases() {
+			aliases[lower(strings.TrimSpace(k))] = lower(strings.TrimSpace(v))
+		}
+	}
+	return aliases
 }
